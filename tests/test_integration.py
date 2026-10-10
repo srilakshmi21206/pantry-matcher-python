@@ -283,3 +283,38 @@ def test_db_one_returns_a_row(database):
 
 def test_db_one_returns_none_when_there_are_no_rows(database):
     assert db.one("SELECT 1 AS x WHERE false") is None
+
+
+def test_delete_removes_one_ingredient(client):
+    put(client, "srii", [{"name": "flour", "grams": 500}, {"name": "sugar", "grams": 100}])
+    response = client.delete("/pantry/srii/flour")
+    assert response.status_code == 200
+    assert response.json() == {"user": "srii", "removed": "flour"}
+    assert client.get("/pantry/srii").json()["items"] == {"sugar": 100.0}
+
+
+def test_delete_normalises_the_name(client):
+    put(client, "srii", [{"name": "egg", "grams": 200}])
+    assert client.delete("/pantry/srii/Eggs").status_code == 200
+    assert client.get("/pantry/srii").json()["items"] == {}
+
+
+def test_delete_missing_ingredient_is_404(client):
+    response = client.delete("/pantry/srii/flour")
+    assert response.status_code == 404
+    assert response.json()["detail"] == "ingredient not in pantry"
+
+
+def test_delete_only_affects_that_user(client):
+    put(client, "asha", [{"name": "flour", "grams": 100}])
+    put(client, "ravi", [{"name": "flour", "grams": 100}])
+    client.delete("/pantry/asha/flour")
+    assert client.get("/pantry/ravi").json()["items"] == {"flour": 100.0}
+
+
+def test_delete_clears_the_cookable_cache(client):
+    put(client, "srii", [{"name": "egg", "grams": 200}])
+    client.get("/pantry/srii/cookable")
+    assert client.get("/pantry/srii/cookable").json()["cached"] is True
+    client.delete("/pantry/srii/egg")
+    assert client.get("/pantry/srii/cookable").json()["cached"] is False
