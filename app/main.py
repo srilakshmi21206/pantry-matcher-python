@@ -89,3 +89,17 @@ def shopping(rid: int, user: str):
         raise HTTPException(404, "no such recipe")
     ok, missing = have_enough(pantry(user)["items"], recipe["needs"])
     return {"recipe": recipe["name"], "can_cook": ok, "shopping_list": missing}
+
+
+@app.delete("/pantry/{user}/{ingredient}")
+def remove_from_pantry(user: str, ingredient: str):
+    name = normalise(ingredient)
+    rows = db.query(
+        "DELETE FROM pantry p USING ingredients i"
+        " WHERE p.ingredient_id=i.id AND p.user_name=%s AND i.name=%s"
+        " RETURNING i.name",
+        (user, name))
+    if not rows:
+        raise HTTPException(404, "ingredient not in pantry")
+    cache.drop(f"cook:{user}")
+    return {"user": user, "removed": name}
