@@ -1,0 +1,138 @@
+version: 2.1
+
+executors:
+  py:
+    docker:
+      - image: cimg/python:3.12
+
+jobs:
+  secret-scan:
+    docker:
+      - image: cimg/base:stable
+    steps:
+      - checkout
+      - run:
+          name: Install gitleaks
+          command: |
+            curl -sSfL https://github.com/gitleaks/gitleaks/releases/download/v8.18.4/gitleaks_8.18.4_linux_x64.tar.gz | tar -xz gitleaks
+      - run:
+          name: Scan the repo history for secrets
+          command: ./gitleaks detect --source . --verbose
+
+  lint:
+    executor: py
+    steps:
+      - checkout
+      - run:
+          name: Install ruff
+          command: pip install ruff
+      - run:
+          name: Lint
+          command: ruff check .
+
+  unit-tests:
+    executor: py
+    steps:
+      - checkout
+      - run:
+          name: Install dependencies
+          command: pip install -r requirements-dev.txt
+      - run:
+          name: Unit tests (no database, no network)
+          command: pytest tests/test_matching.py --cov=app.matching --cov-report=term-missing --cov-fail-under=70
+
+  integration-tests:
+    docker:
+      - image: cimg/python:3.12
+        environment:
+          DATABASE_URL: postgresql://pantry:pantry@localhost:5432/pantry
+          REDIS_URL: redis://localhost:6379/0
+      - image: postgres:16-alpine
+        environment:
+          POSTGRES_USER: pantry
+          POSTGRES_PASSWORD: pantry
+          POSTGRES_DB: pantry
+      - image: redis:7-alpine
+    steps:
+      - checkout
+      - run:
+          name: Install dependencies
+          command: pip install -r requirements-dev.txt
+      - run:
+          name: Wait for Postgres and Redis
+          command: |
+            for i in $(seq 1 30); do
+              python -c "import os, psycopg, redis; psycopg.connect(os.environ['DATABASE_URL']).close(); redis.Redis.from_url(os.environ['REDIS_URL']).ping()" && exit 0
+              sleep 2
+            done
+            echo "Postgres or Redis never became ready"
+            exit 1
+      - run:
+          name: Integration tests against real Postgres and Redis
+          command: pytest --cov=app --cov-report=term-missing --cov-fail-under=70
+
+  build-push:
+    parameters:
+      env_tag:
+        type: string
+    docker:
+      - image: cimg/base:stable
+    steps:
+      - checkout
+      - setup_remote_docker
+      - run:
+          name: Build image with moving and immutable tags
+          command: |
+            SHORT_SHA=$(echo "$CIRCLE_SHA1" | cut -c1-7)
+            IMAGE="$DOCKERHUB_USER/pantry-matcher"
+            docker build \
+              -t "$IMAGE:<< parameters.env_tag >>" \
+              -t "$IMAGE:${CIRCLE_BRANCH}-${SHORT_SHA}" .
+      - run:
+          name: Check the container does not run as root
+          command: |
+            IMAGE="$DOCKERHUB_USER/pantry-matcher"
+            uid=$(docker run --rm "$IMAGE:<< parameters.env_tag >>" id -u)
+            echo "container user id: $uid"
+            test "$uid" != "0"
+      - run:
+          name: Push both tags to Docker Hub
+          command: |
+            SHORT_SHA=$(echo "$CIRCLE_SHA1" | cut -c1-7)
+            IMAGE="$DOCKERHUB_USER/pantry-matcher"
+            echo "$DOCKERHUB_TOKEN" | docker login -u "$DOCKERHUB_USER" --password-stdin
+            docker push "$IMAGE:<< parameters.env_tag >>"
+            docker push "$IMAGE:${CIRCLE_BRANCH}-${SHORT_SHA}"
+
+workflows:
+  qa-pipeline:
+    when:
+      equal: [main, << pipeline.git.branch >>]
+    jobs:
+      - secret-scan
+      - lint:
+          requires: [secret-scan]
+      - unit-tests:
+          requires: [lint]
+      - integration-tests:
+          requires: [unit-tests]
+      - build-push:
+          name: build-push-qa
+          env_tag: qa
+          requires: [integration-tests]
+
+  stage-build:
+    when:
+      equal: [staging, << pipeline.git.branch >>]
+    jobs:
+      - build-push:
+          name: build-push-stage
+          env_tag: stage
+
+  prod-build:
+    when:
+      equal: [prod, << pipeline.git.branch >>]
+    jobs:
+      - build-push:
+          name: build-push-prod
+          env_tag: prod
