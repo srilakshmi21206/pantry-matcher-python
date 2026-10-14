@@ -1,0 +1,231 @@
+
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: postgres-data
+  namespace: prod
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 1Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: postgres
+  namespace: prod
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: postgres
+  template:
+    metadata:
+      labels:
+        app: postgres
+    spec:
+      containers:
+        - name: postgres
+          image: postgres:16-alpine
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 5432
+          env:
+            - name: POSTGRES_USER
+              value: pantry
+            - name: POSTGRES_PASSWORD
+              value: pantry
+            - name: POSTGRES_DB
+              value: pantry
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
+          readinessProbe:
+            exec:
+              command: ["pg_isready", "-U", "pantry", "-d", "pantry"]
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/postgresql/data
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: postgres-data
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres
+  namespace: prod
+spec:
+  selector:
+    app: postgres
+  ports:
+    - port: 5432
+      targetPort: 5432
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: redis
+  namespace: prod
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: redis
+  template:
+    metadata:
+      labels:
+        app: redis
+    spec:
+      containers:
+        - name: redis
+          image: redis:7-alpine
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 6379
+          readinessProbe:
+            exec:
+              command: ["redis-cli", "ping"]
+            initialDelaySeconds: 3
+            periodSeconds: 5
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis
+  namespace: prod
+spec:
+  selector:
+    app: redis
+  ports:
+    - port: 6379
+      targetPort: 6379
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: migrate
+  namespace: prod
+spec:
+  backoffLimit: 6
+  template:
+    spec:
+      restartPolicy: OnFailure
+      imagePullSecrets:
+        - name: dockerhub
+      containers:
+        - name: migrate
+          image: srilakshmi0212/pantry-matcher:prod
+          imagePullPolicy: Always
+          env:
+            - name: DATABASE_URL
+              value: postgresql://pantry:pantry@postgres:5432/pantry
+          command:
+            - python
+            - -c
+            - |
+              import glob
+              import os
+              import time
+              import psycopg
+
+              url = os.environ["DATABASE_URL"]
+
+              for _ in range(60):
+                  try:
+                      with psycopg.connect(url):
+                          break
+                  except Exception:
+                      time.sleep(2)
+              else:
+                  raise SystemExit("postgres never became ready")
+
+              with psycopg.connect(url) as conn:
+                  for path in sorted(glob.glob("/app/migrations/*.sql")):
+                      print("applying", path, flush=True)
+                      with open(path, encoding="utf-8") as f:
+                          conn.execute(f.read())
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: pantry-matcher
+  namespace: prod
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: pantry-matcher
+  template:
+    metadata:
+      labels:
+        app: pantry-matcher
+    spec:
+      imagePullSecrets:
+        - name: dockerhub
+      initContainers:
+        - name: wait-for-migrations
+          image: srilakshmi0212/pantry-matcher:prod
+          imagePullPolicy: Always
+          env:
+            - name: DATABASE_URL
+              value: postgresql://pantry:pantry@postgres:5432/pantry
+          command:
+            - python
+            - -c
+            - |
+              import os
+              import time
+              import psycopg
+
+              url = os.environ["DATABASE_URL"]
+
+              for _ in range(90):
+                  try:
+                      with psycopg.connect(url) as conn:
+                          count = conn.execute(
+                              "SELECT count(*) FROM recipe_items"
+                          ).fetchone()[0]
+                          if count > 0:
+                              break
+                  except Exception:
+                      pass
+                  time.sleep(2)
+              else:
+                  raise SystemExit("migrations never finished")
+      containers:
+        - name: app
+          image: srilakshmi0212/pantry-matcher:prod
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 8080
+          env:
+            - name: DATABASE_URL
+              value: postgresql://pantry:pantry@postgres:5432/pantry
+            - name: REDIS_URL
+              value: redis://redis:6379/0
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 5
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: pantry-matcher
+  namespace: prod
+spec:
+  type: NodePort
+  selector:
+    app: pantry-matcher
+  ports:
+    - port: 8080
+      targetPort: 8080
