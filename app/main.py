@@ -103,3 +103,8 @@ def remove_from_pantry(user: str, ingredient: str):
         raise HTTPException(404, "ingredient not in pantry")
     cache.drop(f"cook:{user}")
     return {"user": user, "removed": name}
+
+
+@app.get("/version")
+def version():
+    return {"app": "pantry-matcher", "version": "1.1"}

@@ -318,3 +318,9 @@ def test_delete_clears_the_cookable_cache(client):
     assert client.get("/pantry/srii/cookable").json()["cached"] is True
     client.delete("/pantry/srii/egg")
     assert client.get("/pantry/srii/cookable").json()["cached"] is False
+
+
+def test_version_endpoint(client):
+    response = client.get("/version")
+    assert response.status_code == 200
+    assert response.json() == {"app": "pantry-matcher", "version": "1.1"}
