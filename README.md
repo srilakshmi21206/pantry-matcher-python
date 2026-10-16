@@ -178,3 +178,93 @@ satisfied by 500 g in the pantry, and 200 g leaves a shortfall of exactly 40 g.
 - Unit tests: `tests/test_matching.py` (no database, no network).
 - Integration tests: `tests/test_integration.py` (real Postgres and Redis).
 - Overall coverage: 100% (minimum required is 70%).
+
+## Git Branch Promotion Workflow
+
+The project uses three protected branches:
+
+- `main` — QA environment
+- `staging` — staging environment
+- `prod` — production environment
+
+Changes are promoted through pull requests rather than pushed directly to protected branches:
+
+`feature branch → main → staging → prod`
+
+This workflow provides reviewable changes and separates development, testing, and production releases.
+
+## CI/CD with CircleCI
+
+CircleCI automates the project's quality checks and Docker image publishing.
+
+### QA pipeline (`main`)
+
+- Secret scanning with Gitleaks
+- Python linting with Ruff
+- Unit tests
+- Integration tests using PostgreSQL and Redis
+- Docker image build and push to Docker Hub
+
+### Staging pipeline (`staging`)
+
+Builds and publishes the staging image after changes are promoted to `staging`.
+
+### Production pipeline (`prod`)
+
+Builds and publishes the production image after changes are promoted to `prod`.
+
+### Docker image tags
+
+Docker Hub repository: https://hub.docker.com/r/srilakshmi0212/pantry-matcher
+
+| Environment | Moving tag | Immutable release tag format |
+|---|---|---|
+| QA | `qa` | `main-<short-sha>` |
+| Staging | `stage` | `staging-<short-sha>` |
+| Production | `prod` | `prod-<short-sha>` |
+
+The moving tags identify the latest image for each environment. Commit-specific tags help identify the exact build associated with a release.
+
+## Kubernetes Deployment
+
+The application is deployed to Kubernetes in three namespaces:
+
+- `qa`
+- `stage`
+- `prod`
+
+Each namespace contains the Pantry Matcher application, PostgreSQL, and Redis. The application uses a Kubernetes Deployment and Service, with two application replicas.
+
+The deployment configuration uses the appropriate environment-specific Docker image tag and `imagePullPolicy: Always`. A Docker Hub image-pull secret is configured for accessing the registry.
+
+Database migrations run before the application starts. The `/health` endpoint checks PostgreSQL and Redis connectivity.
+
+### Verify the deployment
+
+Check pods and services in an environment:
+
+```bash
+kubectl get pods,services -n qa
+kubectl get pods,services -n stage
+kubectl get pods,services -n prod
+```
+
+Check deployment status:
+
+```bash
+kubectl rollout status deployment/pantry-matcher -n qa
+kubectl rollout status deployment/pantry-matcher -n stage
+kubectl rollout status deployment/pantry-matcher -n prod
+```
+
+## Verification
+
+The local test suite has passed with 86 tests and 100% statement coverage in the reported run. CircleCI has also completed the QA pipeline, including secret scanning, linting, unit tests, integration tests, and Docker image publishing.
+
+The application health endpoint should return:
+
+```json
+{"status":"ok","postgres":true,"redis":true}
+```
+
+The `/version` endpoint reports the application name and version.
