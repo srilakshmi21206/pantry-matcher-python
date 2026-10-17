@@ -268,3 +268,8 @@ The application health endpoint should return:
 ```
 
 The `/version` endpoint reports the application name and version.
+
+
+##CI/CD DEMO
+
+demo:verify
